@@ -18,15 +18,24 @@ Independent Flutter port of `@viewtrade/bridge-react-native-sdk`, preserving the
 
 ## Install
 
+Published on [pub.dev](https://pub.dev/packages/bridge_flutter_sdk):
+
 ```yaml
 dependencies:
-  bridge_flutter_sdk:
-    path: ../bridge-flutter-sdk   # or git / pub once published
+  bridge_flutter_sdk: ^1.0.0
   # Transitive: glomopay_sdk, webview_flutter, shared_preferences, http, path_provider
 ```
 
 ```bash
 flutter pub get
+```
+
+For local development against this repo:
+
+```yaml
+dependencies:
+  bridge_flutter_sdk:
+    path: ../bridge-flutter-sdk
 ```
 
 ### Android
