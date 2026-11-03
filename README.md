@@ -34,7 +34,7 @@ flutter pub add bridge_flutter_sdk
 
 ```yaml
 dependencies:
-  bridge_flutter_sdk: ^1.0.0
+  bridge_flutter_sdk: ^1.0.1
   # Transitive: glomopay_sdk, webview_flutter, shared_preferences, http, path_provider
 ```
 

@@ -1,6 +1,6 @@
 name: bridge_flutter_sdk
 description: "bridge-flutter-sdk — ViewTrade Bridge Flutter SDK (embeddable WebView onboarding/trading shell)."
-version: 1.0.0
+version: 1.0.1
 homepage: https://www.viewtrade.com
 repository: https://github.com/viewtrade/bridge-flutter-sdk
 

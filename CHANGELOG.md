@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.0.1
+
+- Document pub.dev installation (`flutter pub add`, `pubspec.yaml`, import) in README.
+
 ## 1.0.0
 
 - Initial Flutter release mirroring `@viewtrade/bridge-react-native-sdk`.
