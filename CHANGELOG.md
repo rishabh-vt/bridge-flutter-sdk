@@ -9,6 +9,7 @@ Mobile App Integration (Bridge SDK UAT guide):
 - Camera/mic permission flow via `permission_handler`.
 - Funding popup WebView, back-stack handling, `; wv` UA strip, third-party cookies.
 - User-tapped links open in a closable overlay; document links view in-overlay.
+- iOS `onNavigationResponse`: show MIME WK can render (PDF); download the rest.
 - `mailto:` / `tel:` open the default system apps (`LaunchMode.externalApplication`).
 - Document downloads: blob / zip / `download` attr + `onDownloadStartRequest`; MethodChannel `bridge_flutter_sdk/downloads`.
 - Download permissions (Android storage/notifications; iOS Documents + Files sharing).

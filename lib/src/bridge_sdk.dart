@@ -625,7 +625,8 @@ class _BridgeSdkState extends State<BridgeSdk> implements BridgeSdkController {
     }
   }
 
-  /// iOS: save archives; allow PDFs/docs to render for viewing.
+  /// iOS (SDK_UAT): show MIME types WK can render (PDF); download the rest.
+  /// Zip / bulk packages are always saved.
   Future<NavigationResponseAction?> _handleNavigationResponse(
     InAppWebViewController controller,
     NavigationResponse navigationResponse, {
@@ -638,16 +639,20 @@ class _BridgeSdkState extends State<BridgeSdk> implements BridgeSdkController {
     final response = navigationResponse.response;
     final mime = response?.mimeType;
     final url = response?.url?.toString() ?? '';
+    final suggested = response?.suggestedFilename;
 
-    // Zip / bulk package → save. PDF/HTML → allow (open/view).
-    if (shouldForceDownload(
+    final forceSave = shouldForceDownload(
       url: url,
       mimeType: mime,
-      suggestedFileName: response?.suggestedFilename,
-    )) {
+      suggestedFileName: suggested,
+    );
+    // Match native guide: canShowMIMEType ? allow : download.
+    final cannotShow = !navigationResponse.canShowMIMEType;
+
+    if (forceSave || cannotShow) {
       debugPrint(
         'BridgeSDK: navigationResponse → download mime=$mime '
-        'file=${response?.suggestedFilename} url=$url',
+        'file=$suggested url=$url canShow=${navigationResponse.canShowMIMEType}',
       );
       if (url.isNotEmpty) {
         unawaited(
@@ -655,7 +660,7 @@ class _BridgeSdkState extends State<BridgeSdk> implements BridgeSdkController {
             controller,
             url,
             fromOverlay: fromOverlay,
-            suggestedName: response?.suggestedFilename,
+            suggestedName: suggested,
           ),
         );
         return NavigationResponseAction.CANCEL;
