@@ -57,7 +57,7 @@ class _BridgeHomeState extends State<_BridgeHome> {
   );
   static const String _clientName = String.fromEnvironment(
     'BRIDGE_CLIENT_NAME',
-    defaultValue: 'NSEIXGA',
+    defaultValue: '',
   );
 
   void _openBridge() {
