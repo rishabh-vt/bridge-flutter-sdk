@@ -1,9 +1,5 @@
-import 'types/types.dart';
-
-/// Imperative API mirroring the React Native `BridgeSDKRef`.
+/// Imperative API for [BridgeSdk].
 abstract class BridgeSdkController {
-  void reload();
-  Future<void> logout();
-  Future<void> postMessage(Object? message);
-  AuthChangeState getAuthState();
+  /// Re-fetches `/launch` and remounts the WebView.
+  Future<void> reload();
 }

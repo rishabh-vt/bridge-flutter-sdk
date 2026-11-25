@@ -1,146 +1,267 @@
 import 'dart:async';
+import 'dart:collection';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:glomopay_sdk/glomopay_sdk.dart' hide SdkError;
-import 'package:webview_flutter/webview_flutter.dart';
-import 'package:webview_flutter_android/webview_flutter_android.dart';
-import 'package:webview_flutter_wkwebview/webview_flutter_wkwebview.dart';
+import 'package:flutter_inappwebview/flutter_inappwebview.dart';
+import 'package:permission_handler/permission_handler.dart';
+import 'package:url_launcher/url_launcher.dart' as url_launcher;
 
 import 'bridge_sdk_controller.dart';
-import 'internal/constants.dart';
-import 'internal/default_adapters.dart';
 import 'internal/security.dart';
-import 'services/document_download.dart';
-import 'services/message_router.dart';
-import 'services/storage_service.dart';
-import 'services/webview_bridge.dart';
+import 'services/download_service.dart';
+import 'services/launch_service.dart';
 import 'types/errors.dart';
 import 'types/types.dart';
 
-/// Embeddable WebView-based onboarding/trading shell for Flutter host apps.
+const String _sdkVersion = '2.1.0';
+
+/// Capture blob: URLs and route ZIP / `download` attr clicks to Flutter.
+/// Handles programmatic `a.click()` used by "Download all documents".
+const String _blobCaptureJs = r'''
+(function () {
+  if (window.__blobCapture) return;
+  window.__blobCapture = true;
+  window.__blobs = {}; window.__blobNames = {};
+
+  function isArchive(href, name) {
+    return /\.zip(\?|#|$)/i.test(href || '') || /\.zip$/i.test(name || '');
+  }
+  function shouldSave(a) {
+    if (!a || !a.href) return false;
+    var href = a.href;
+    var name = a.getAttribute('download') || a.download || '';
+    // Explicit download / blob / zip → save. Plain PDF hrefs stay viewable.
+    return !!(name || href.indexOf('blob:') === 0 || isArchive(href, name));
+  }
+  function remember(a) {
+    try {
+      if (a && a.href && a.href.indexOf('blob:') === 0) {
+        var n = a.getAttribute('download') || a.download || '';
+        if (n) window.__blobNames[a.href] = n;
+      }
+    } catch (e) {}
+  }
+  function handoff(a) {
+    try {
+      remember(a);
+      if (!shouldSave(a)) return false;
+      if (window.flutter_inappwebview && window.flutter_inappwebview.callHandler) {
+        window.flutter_inappwebview.callHandler(
+          'bridgeDownload',
+          a.href,
+          a.getAttribute('download') || a.download || ''
+        );
+        return true;
+      }
+    } catch (e) {}
+    return false;
+  }
+
+  var create = URL.createObjectURL;
+  URL.createObjectURL = function (obj) {
+    var url = create.call(URL, obj);
+    try {
+      if (obj instanceof Blob) {
+        window.__blobs[url] = obj;
+        // Prefer zip filename when Bridge builds a bulk archive blob.
+        if (obj.type && /zip/i.test(obj.type)) {
+          window.__blobNames[url] = window.__blobNames[url] || 'documents.zip';
+        }
+      }
+    } catch (e) {}
+    return url;
+  };
+
+  var click = HTMLAnchorElement.prototype.click;
+  HTMLAnchorElement.prototype.click = function () {
+    if (handoff(this)) return;
+    return click.apply(this, arguments);
+  };
+  var dispatch = HTMLAnchorElement.prototype.dispatchEvent;
+  HTMLAnchorElement.prototype.dispatchEvent = function (evt) {
+    if (evt && evt.type === 'click' && handoff(this)) {
+      if (typeof evt.preventDefault === 'function') evt.preventDefault();
+      return false;
+    }
+    return dispatch.apply(this, arguments);
+  };
+})();
+''';
+
+/// DOM click fallback for downloads + mailto/tel (opens default system apps).
+const String _downloadClickJs = r'''
+(function () {
+  if (window.__bridgeDownloadClick) return;
+  window.__bridgeDownloadClick = true;
+  function isArchive(href, name) {
+    return /\.zip(\?|#|$)/i.test(href || '') || /\.zip$/i.test(name || '');
+  }
+  document.addEventListener('click', function (e) {
+    try {
+      var a = e.target && e.target.closest ? e.target.closest('a') : null;
+      if (!a || !a.href) return;
+      var href = a.href;
+      var name = a.getAttribute('download') || '';
+      if (href.indexOf('mailto:') === 0 || href.indexOf('tel:') === 0) {
+        e.preventDefault();
+        e.stopPropagation();
+        if (window.flutter_inappwebview && window.flutter_inappwebview.callHandler) {
+          window.flutter_inappwebview.callHandler('bridgeOpenExternal', href);
+        }
+        return;
+      }
+      if (!(name || href.indexOf('blob:') === 0 || isArchive(href, name))) return;
+      e.preventDefault();
+      e.stopPropagation();
+      if (window.flutter_inappwebview && window.flutter_inappwebview.callHandler) {
+        window.flutter_inappwebview.callHandler('bridgeDownload', href, name);
+      }
+    } catch (err) {}
+  }, true);
+})();
+''';
+
+/// Hide page-level scrollbars inside the WebView (scrolling still works).
+const String _hideScrollbarCssJs = r'''
+(function () {
+  if (window.__bridgeHideScrollbar) return;
+  window.__bridgeHideScrollbar = true;
+  var css = 'html,body{-ms-overflow-style:none;scrollbar-width:none;}' +
+    'html::-webkit-scrollbar,body::-webkit-scrollbar,*::-webkit-scrollbar{display:none;width:0;height:0;}';
+  var style = document.createElement('style');
+  style.type = 'text/css';
+  style.appendChild(document.createTextNode(css));
+  (document.head || document.documentElement).appendChild(style);
+})();
+''';
+
+/// Embeddable Bridge shell — token → `POST /launch` → InAppWebView (mobile module).
 class BridgeSdk extends StatefulWidget {
   const BridgeSdk({
     super.key,
-    required this.firmId,
-    required this.appName,
-    required this.authFormSlug,
-    required this.branchIdRi,
-    required this.branchIdNri,
-    required this.helpUrl,
-    required this.helpEmail,
-    required this.tncUrl,
-    required this.ppUrl,
-    required this.disclaimerUrl,
-    required this.aboutUrl,
+    required this.token,
+    required this.refreshToken,
+    required this.clientName,
+    required this.returnUrl,
     required this.environment,
-    required this.theme,
-    this.webviewUrl,
-    this.appLogoUrl,
-    this.storage,
-    this.logger,
-    this.allowedOrigins,
-    this.sso = false,
-    this.userAccessToken,
+    required this.accessTokenExpiresAt,
+    required this.refreshTokenExpiresAt,
     this.onReady,
-    this.onAuthChange,
-    this.onLogout,
-    this.onCheckoutEvent,
+    this.onReturn,
     this.onError,
+    this.onDownloadSaved,
+    this.onDownloadError,
     this.controller,
-    this.enableApiLogs = false,
   });
 
-  final String firmId;
-  final String appName;
-  final String authFormSlug;
-  final String branchIdRi;
-  final String branchIdNri;
-  final String helpUrl;
-  final String helpEmail;
-  final String tncUrl;
-  final String ppUrl;
-  final String disclaimerUrl;
-  final String aboutUrl;
+  /// Host access token (`tokens.access_token`) → launch body `token`.
+  final String token;
+
+  /// Host refresh token (`tokens.refresh_token`) → launch body `refreshToken`.
+  final String refreshToken;
+
+  /// Host client id → launch body `clientName`.
+  final String clientName;
+
+  /// Custom app scheme return URL (e.g. `myapp://sdk-return`), not http(s).
+  final String returnUrl;
+
+  /// [Environment.UAT] or [Environment.PROD].
   final Environment environment;
-  final ThemeConfig theme;
 
-  final String? webviewUrl;
-  final String? appLogoUrl;
-  final StorageAdapter? storage;
-  final Logger? logger;
-  final List<String>? allowedOrigins;
+  /// Epoch seconds/ms — `tokens.access_expires_at`.
+  final String accessTokenExpiresAt;
 
-  final bool sso;
-  final String? userAccessToken;
+  /// Epoch seconds/ms — `tokens.refresh_expires_at`.
+  final String refreshTokenExpiresAt;
 
   final VoidCallback? onReady;
-  final ValueChanged<AuthChangeState>? onAuthChange;
-  final VoidCallback? onLogout;
-  final ValueChanged<CheckoutEvent>? onCheckoutEvent;
+
+  /// Fired when Bridge navigates to [returnUrl] (never loads — intercepted).
+  final ValueChanged<BridgeReturn>? onReturn;
+
   final ValueChanged<SdkError>? onError;
 
-  /// Optional host-owned controller for imperative API access.
-  final ValueNotifier<BridgeSdkController?>? controller;
+  /// Fired after a document was saved (blob ZIP / PDF / etc.).
+  final ValueChanged<String>? onDownloadSaved;
 
-  /// When true, intercepts WebView `fetch`/XHR and prints request/response
-  /// logs to the Flutter console (truncated bodies). Debug/dev only.
-  final bool enableApiLogs;
+  /// Fired when a download fails.
+  final ValueChanged<Object>? onDownloadError;
+
+  final ValueNotifier<BridgeSdkController?>? controller;
 
   @override
   State<BridgeSdk> createState() => _BridgeSdkState();
 }
 
 class _BridgeSdkState extends State<BridgeSdk> implements BridgeSdkController {
-  late final Logger _logger;
-  late final StorageAdapter _storageAdapter;
-  late final StorageService _storageService;
-  late final MessageRouter _messageRouter;
+  final LaunchService _launchService = LaunchService();
+  final DownloadService _downloadService = DownloadService();
 
-  WebViewController? _webViewController;
-  AuthTokens _storedTokens = {};
+  InAppWebViewController? _mainController;
+  InAppWebViewController? _popupController;
+  String? _launchUrl;
+  int? _popupWindowId;
+  String? _overlayUrl;
+  bool _showOverlay = false;
+  bool _bootstrapping = true;
+  bool _returnFired = false;
+  bool _sessionEnded = false;
+  bool _readyFired = false;
   int _webViewInstanceKey = 0;
-  bool _authHydrated = false;
-  bool _canGoBack = false;
-  bool _hasEverBeenReady = false;
-  bool _bridgeNavigationInProgress = false;
+  BridgeReturn? _lastReturn;
 
-  CheckoutPayload? _checkout;
+  UnmodifiableListView<UserScript> get _userScripts =>
+      UnmodifiableListView<UserScript>([
+        UserScript(
+          source: _blobCaptureJs,
+          injectionTime: UserScriptInjectionTime.AT_DOCUMENT_START,
+        ),
+        UserScript(
+          source: _downloadClickJs,
+          injectionTime: UserScriptInjectionTime.AT_DOCUMENT_START,
+        ),
+        UserScript(
+          source: _hideScrollbarCssJs,
+          injectionTime: UserScriptInjectionTime.AT_DOCUMENT_START,
+        ),
+      ]);
 
-  Timer? _readyFallbackTimer;
-  Timer? _readySignalTimer;
-  Timer? _maxOverlayTimer;
-
-  String get _resolvedWebviewUrl {
-    final override = widget.webviewUrl;
-    if (override != null && override.isNotEmpty) return override;
-    return webviewUrls[widget.environment.name] ?? webviewUrls['uat']!;
-  }
+  InAppWebViewSettings get _webSettings => InAppWebViewSettings(
+        javaScriptEnabled: true,
+        domStorageEnabled: true,
+        databaseEnabled: true,
+        supportMultipleWindows: true,
+        javaScriptCanOpenWindowsAutomatically: true,
+        mixedContentMode: MixedContentMode.MIXED_CONTENT_ALWAYS_ALLOW,
+        mediaPlaybackRequiresUserGesture: false,
+        allowsInlineMediaPlayback: true,
+        allowsBackForwardNavigationGestures: true,
+        useOnDownloadStart: true,
+        // iOS: inspect response MIME so PDFs are downloaded, not opened in-WebView.
+        useOnNavigationResponse: true,
+        // Required for shouldOverrideUrlLoading (custom-scheme returnUrl).
+        useShouldOverrideUrlLoading: true,
+        thirdPartyCookiesEnabled: true,
+        sharedCookiesEnabled: true,
+        iframeAllow: 'camera; microphone; payment; geolocation',
+        iframeAllowFullscreen: true,
+        isInspectable: !kReleaseMode,
+        // Hide native WebView scrollbars (content still scrolls).
+        verticalScrollBarEnabled: false,
+        horizontalScrollBarEnabled: false,
+        // Bank/funding pages reject the "; wv" WebView UA marker — set before load.
+        userAgent: null,
+      );
 
   @override
   void initState() {
     super.initState();
-    _logger = widget.logger ??
-        createDefaultLogger(enabled: !kReleaseMode);
-    _storageAdapter = widget.storage ?? getDefaultStorage();
-    _storageService = StorageService(_storageAdapter, _logger);
-
-    _messageRouter = MessageRouter(
-      storageService: _storageService,
-      logger: _logger,
-      onTokensChanged: _handleTokensChanged,
-      onLogout: _handleLogout,
-      onCheckoutRequested: _handleCheckoutRequested,
-      onWebViewReady: _handleWebViewReady,
-      clearWebViewAuthState: _clearWebViewAuthState,
-      onDocumentDownloadComplete: _handleDocumentDownloadComplete,
-    );
-
     widget.controller?.value = this;
-
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      _validateAndBootstrap();
+      unawaited(_bootstrap());
     });
   }
 
@@ -151,54 +272,36 @@ class _BridgeSdkState extends State<BridgeSdk> implements BridgeSdkController {
       oldWidget.controller?.value = null;
       widget.controller?.value = this;
     }
+
+    final authChanged = widget.token != oldWidget.token ||
+        widget.refreshToken != oldWidget.refreshToken ||
+        widget.clientName != oldWidget.clientName ||
+        widget.returnUrl != oldWidget.returnUrl ||
+        widget.environment != oldWidget.environment ||
+        widget.accessTokenExpiresAt != oldWidget.accessTokenExpiresAt ||
+        widget.refreshTokenExpiresAt != oldWidget.refreshTokenExpiresAt;
+
+    if (authChanged) {
+      unawaited(reload());
+    }
   }
 
   @override
   void dispose() {
     widget.controller?.value = null;
-    _readyFallbackTimer?.cancel();
-    _readySignalTimer?.cancel();
-    _maxOverlayTimer?.cancel();
+    _launchService.close();
+    _downloadService.close();
     super.dispose();
   }
 
-  Future<void> _validateAndBootstrap() async {
-    final err = _validateProps(_resolvedWebviewUrl);
-    if (err != null) {
-      _logger.error(err.message);
-      widget.onError?.call(err);
-    }
-
-    if (widget.sso && widget.userAccessToken != null) {
-      _storedTokens = {
-        'accessToken': widget.userAccessToken,
-        'refreshToken': null,
-      };
-      await _storageService.saveTokens(_storedTokens);
-    } else {
-      _storedTokens = await _storageService.loadTokens();
-    }
-
-    if (!mounted) return;
-    setState(() {
-      _authHydrated = true;
-    });
-    await _createWebViewController();
-  }
-
-  SdkError? _validateProps(String resolvedUrl) {
+  SdkError? _validateProps() {
     final required = <String, String>{
-      'firmId': widget.firmId,
-      'appName': widget.appName,
-      'authFormSlug': widget.authFormSlug,
-      'branchIdRi': widget.branchIdRi,
-      'branchIdNri': widget.branchIdNri,
-      'helpUrl': widget.helpUrl,
-      'helpEmail': widget.helpEmail,
-      'tncUrl': widget.tncUrl,
-      'ppUrl': widget.ppUrl,
-      'disclaimerUrl': widget.disclaimerUrl,
-      'aboutUrl': widget.aboutUrl,
+      'token': widget.token,
+      'refreshToken': widget.refreshToken,
+      'clientName': widget.clientName,
+      'returnUrl': widget.returnUrl,
+      'accessTokenExpiresAt': widget.accessTokenExpiresAt,
+      'refreshTokenExpiresAt': widget.refreshTokenExpiresAt,
     };
     for (final entry in required.entries) {
       if (entry.value.isEmpty) {
@@ -208,344 +311,712 @@ class _BridgeSdkState extends State<BridgeSdk> implements BridgeSdkController {
         );
       }
     }
-    if (widget.theme.primaryColor.isEmpty ||
-        widget.theme.secondaryColor.isEmpty) {
+    final returnCheck = validateReturnUrl(widget.returnUrl);
+    if (!returnCheck.ok) {
       return SdkError(
         SdkErrorCode.invalidConfig,
-        'BridgeSDK: required prop "theme" must have primaryColor and secondaryColor',
-      );
-    }
-    if (widget.sso &&
-        (widget.userAccessToken == null || widget.userAccessToken!.isEmpty)) {
-      return SdkError(
-        SdkErrorCode.invalidConfig,
-        'BridgeSDK: userAccessToken is required when sso is true',
-      );
-    }
-    final schemeCheck = validateUrlScheme(
-      resolvedUrl,
-      environment: widget.environment.name,
-    );
-    if (!schemeCheck.ok) {
-      return SdkError(
-        SdkErrorCode.invalidConfig,
-        'BridgeSDK: webviewUrl rejected — ${schemeCheck.reason}',
+        'BridgeSDK: returnUrl rejected — ${returnCheck.reason}',
       );
     }
     return null;
   }
 
-  WebViewInjectedConfig _buildInjectedConfig() {
-    return WebViewInjectedConfig(
-      firmId: widget.firmId,
-      appName: widget.appName,
-      authFormSlug: widget.authFormSlug,
-      sdkVersion: sdkVersion,
-      branchIdRi: widget.branchIdRi,
-      branchIdNri: widget.branchIdNri,
-      helpUrl: widget.helpUrl,
-      helpEmail: widget.helpEmail,
-      tncUrl: widget.tncUrl,
-      ppUrl: widget.ppUrl,
-      disclaimerUrl: widget.disclaimerUrl,
-      aboutUrl: widget.aboutUrl,
-      appLogoUrl: widget.appLogoUrl ?? '',
-      environment: widget.environment,
-      themePrimaryColor: widget.theme.primaryColor,
-      themeSecondaryColor: widget.theme.secondaryColor,
-    );
-  }
-
-  Set<String> get _allowedOrigins {
-    return buildOriginWhitelist(
-      webviewUrl: _resolvedWebviewUrl,
-      allowedOrigins: [
-        ...sdkDefaultAllowedOrigins,
-        ...?widget.allowedOrigins,
-      ],
-    );
-  }
-
-  String? _originOf(String url) => safeOrigin(url);
-
-  bool _isBridgeNavigation(String? url) {
-    final webviewOrigin = _originOf(_resolvedWebviewUrl);
-    if (url == null || webviewOrigin == null) return true;
-    return _originOf(url) == webviewOrigin;
-  }
-
-  Future<void> _createWebViewController() async {
-    late final PlatformWebViewControllerCreationParams params;
-    if (WebViewPlatform.instance is WebKitWebViewPlatform) {
-      params = WebKitWebViewControllerCreationParams(
-        allowsInlineMediaPlayback: false,
-        mediaTypesRequiringUserAction: const {
-          PlaybackMediaTypes.audio,
-          PlaybackMediaTypes.video,
-        },
-      );
-    } else {
-      params = const PlatformWebViewControllerCreationParams();
-    }
-
-    final controller = WebViewController.fromPlatformCreationParams(params);
-
-    await controller.setJavaScriptMode(JavaScriptMode.unrestricted);
-    await controller.setBackgroundColor(
-      _parseColor(widget.theme.secondaryColor),
-    );
-    await controller.addJavaScriptChannel(
-      WebViewBridge.flutterChannelName,
-      onMessageReceived: (message) {
-        _messageRouter.handleRawMessage(message.message);
-      },
-    );
-
-    await controller.setNavigationDelegate(
-      NavigationDelegate(
-        onNavigationRequest: (request) {
-          if (widget.enableApiLogs) {
-            _logger.debug('Nav → ${request.url}');
-          }
-          final decision = isUrlAllowed(request.url, _allowedOrigins);
-          if (!decision.allowed) {
-            _logger.warn(
-              'WebView navigation blocked',
-              [decision.reason, request.url],
-            );
-            return NavigationDecision.prevent;
-          }
-          return NavigationDecision.navigate;
-        },
-        onPageStarted: (url) async {
-          // Inject bridge shim + config as early as possible.
-          await _injectBootstrap();
-
-          if (!_isBridgeNavigation(url)) return;
-          if (_hasEverBeenReady) return;
-
-          _bridgeNavigationInProgress = true;
-          _maxOverlayTimer?.cancel();
-          _maxOverlayTimer = Timer(
-            const Duration(milliseconds: AnimationTimings.maxOverlayMs),
-            () {
-              _bridgeNavigationInProgress = false;
-            },
-          );
-        },
-        onPageFinished: (url) async {
-          // Re-inject after load so SPA boots always see config + shim.
-          await _injectBootstrap();
-
-          if (!_bridgeNavigationInProgress) return;
-          _bridgeNavigationInProgress = false;
-          _maxOverlayTimer?.cancel();
-
-          if (_readySignalTimer != null) return;
-          _readyFallbackTimer?.cancel();
-          _readyFallbackTimer = Timer(
-            const Duration(milliseconds: AnimationTimings.loadEndFallbackMs),
-            () {},
-          );
-        },
-        onWebResourceError: (error) {
-          if (error.isForMainFrame ?? true) {
-            widget.onError?.call(
-              SdkError(
-                SdkErrorCode.webviewLoadFailed,
-                error.description,
-                error,
-              ),
-            );
-          }
-        },
-        onUrlChange: (change) async {
-          final canGoBack = await _webViewController?.canGoBack() ?? false;
-          if (mounted) {
-            setState(() => _canGoBack = canGoBack);
-          }
-        },
-      ),
-    );
-
-    if (controller.platform is AndroidWebViewController) {
-      final android = controller.platform as AndroidWebViewController;
-      await android.setMediaPlaybackRequiresUserGesture(true);
-      await AndroidWebViewController.enableDebugging(!kReleaseMode);
-      await android.setGeolocationPermissionsPromptCallbacks(
-        onShowPrompt: (_) async {
-          return const GeolocationPermissionsResponse(
-            allow: false,
-            retain: false,
-          );
-        },
-      );
-    }
-
-    if (controller.platform is WebKitWebViewController) {
-      final ios = controller.platform as WebKitWebViewController;
-      await ios.setAllowsBackForwardNavigationGestures(true);
-    }
-
-    await controller.setUserAgent(await _buildUserAgent(controller));
-    await controller.loadRequest(Uri.parse(_resolvedWebviewUrl));
-
+  Future<void> _bootstrap() async {
     if (!mounted) return;
     setState(() {
-      _webViewController = controller;
+      _bootstrapping = true;
+      _mainController = null;
+      _popupController = null;
+      _launchUrl = null;
+      _showOverlay = false;
+      _popupWindowId = null;
+      _overlayUrl = null;
+      _returnFired = false;
+      _sessionEnded = false;
+      _lastReturn = null;
+      _readyFired = false;
     });
-  }
 
-  Future<String> _buildUserAgent(WebViewController controller) async {
-    // Append BridgeSDK/<version> for backend identification.
-    try {
-      final current = await controller
-          .runJavaScriptReturningResult('navigator.userAgent');
-      final ua = current.toString().replaceAll('"', '');
-      if (ua.contains('BridgeSDK/')) return ua;
-      return '$ua BridgeSDK/$sdkVersion';
-    } catch (_) {
-      return 'BridgeSDK/$sdkVersion';
+    final configError = _validateProps();
+    if (configError != null) {
+      debugPrint(configError.message);
+      widget.onError?.call(configError);
+      if (mounted) setState(() => _bootstrapping = false);
+      return;
     }
-  }
 
-  Future<void> _injectBootstrap() async {
-    final controller = _webViewController;
-    if (controller == null) return;
-    final script = webViewBridge.getInjectionScript(
-      _storedTokens,
-      _buildInjectedConfig(),
-      enableApiLogs: widget.enableApiLogs,
-    );
     try {
-      await controller.runJavaScript(script);
+      final launchUrl = await _launchService.fetchLaunchUrl(
+        environment: widget.environment,
+        request: LaunchRequest(
+          token: widget.token,
+          refreshToken: widget.refreshToken,
+          clientName: widget.clientName,
+          returnUrl: widget.returnUrl,
+          accessTokenExpiresAt: widget.accessTokenExpiresAt,
+          refreshTokenExpiresAt: widget.refreshTokenExpiresAt,
+        ),
+      );
+
+      final schemeCheck = validateHttpsUrl(launchUrl);
+      if (!schemeCheck.ok) {
+        final err = SdkError(
+          SdkErrorCode.launchFailed,
+          'BridgeSDK: launchUrl rejected — ${schemeCheck.reason}',
+        );
+        debugPrint(err.message);
+        widget.onError?.call(err);
+        if (mounted) setState(() => _bootstrapping = false);
+        return;
+      }
+
+      if (!mounted) return;
+      setState(() {
+        _launchUrl = launchUrl;
+        _webViewInstanceKey += 1;
+        _bootstrapping = false;
+      });
+    } on SdkError catch (error) {
+      debugPrint(error.message);
+      widget.onError?.call(error);
+      if (mounted) setState(() => _bootstrapping = false);
     } catch (error) {
-      _logger.warn('Failed to inject WebView bootstrap', [error]);
+      final err = SdkError(
+        SdkErrorCode.launchFailed,
+        'BridgeSDK: unexpected launch error — $error',
+        error,
+      );
+      debugPrint(err.message);
+      widget.onError?.call(err);
+      if (mounted) setState(() => _bootstrapping = false);
     }
   }
 
-  Future<void> _runScript(String script) async {
-    final controller = _webViewController;
-    if (controller == null) return;
+  Future<void> _prepareController(InAppWebViewController controller) async {
     try {
-      await controller.runJavaScript(script);
-    } catch (error) {
-      _logger.warn('Failed to run WebView script', [error]);
+      final ua = await controller.evaluateJavascript(
+        source: 'navigator.userAgent',
+      );
+      if (ua is String) {
+        final cleaned =
+            ua.replaceAll('; wv', '').replaceAll('"', '').trim();
+        await controller.setSettings(
+          settings: InAppWebViewSettings(
+            userAgent: '$cleaned BridgeSDK/$_sdkVersion',
+          ),
+        );
+      }
+    } catch (e) {
+      debugPrint('BridgeSDK: prepare controller warning — $e');
     }
   }
 
-  void _handleTokensChanged(AuthTokens tokens) {
-    setState(() => _storedTokens = tokens);
-    widget.onAuthChange?.call(
-      AuthChangeState(authenticated: true, tokens: tokens),
+  void _registerDownloadHandler(InAppWebViewController controller) {
+    controller.addJavaScriptHandler(
+      handlerName: 'bridgeDownload',
+      callback: (args) {
+        final url = args.isNotEmpty ? args[0]?.toString() ?? '' : '';
+        final name = args.length > 1 ? args[1]?.toString() : null;
+        if (url.isEmpty) return null;
+        unawaited(
+          _downloadService
+              .saveFromWebView(
+            controller: controller,
+            url: url,
+            suggestedName: (name == null || name.isEmpty) ? null : name,
+          )
+              .then((saved) {
+            debugPrint('BridgeSDK: saved download $saved');
+            widget.onDownloadSaved?.call(saved);
+          }).catchError((Object e) {
+            debugPrint('BridgeSDK: bridgeDownload failed — $e');
+            widget.onDownloadError?.call(e);
+          }),
+        );
+        return null;
+      },
     );
-  }
-
-  void _handleLogout() {
-    _resetWebView();
-    widget.onAuthChange?.call(
-      const AuthChangeState(authenticated: false, tokens: {}),
-    );
-    widget.onLogout?.call();
-  }
-
-  void _handleCheckoutRequested(CheckoutPayload payload) {
-    setState(() => _checkout = payload);
-    widget.onCheckoutEvent?.call(CheckoutRequested(payload));
-  }
-
-  void _handleWebViewReady() {
-    _maxOverlayTimer?.cancel();
-    _readyFallbackTimer?.cancel();
-    _readySignalTimer?.cancel();
-    _readySignalTimer = Timer(
-      const Duration(milliseconds: AnimationTimings.webviewPaintGraceMs),
-      () {
-        _hasEverBeenReady = true;
-        widget.onReady?.call();
+    controller.addJavaScriptHandler(
+      handlerName: 'bridgeOpenExternal',
+      callback: (args) {
+        final raw = args.isNotEmpty ? args[0]?.toString() ?? '' : '';
+        if (raw.isEmpty) return null;
+        final uri = Uri.tryParse(raw);
+        if (uri == null) return null;
+        if (uri.scheme == 'mailto' || uri.scheme == 'tel') {
+          unawaited(_openExternalApp(uri));
+        }
+        return null;
       },
     );
   }
 
-  void _handleDocumentDownloadComplete(DocumentDownloadResult result) {
-    unawaited(
-      _runScript(
-        webViewBridge.getPostMessageScript({
-          'type': 'document.download-complete',
-          'payload': result.toJson(),
-        }),
+  Future<void> _loadLaunchUrl(
+    InAppWebViewController controller,
+    String launchUrl,
+  ) async {
+    await _prepareController(controller);
+    debugPrint('BridgeSDK: loading launchUrl=$launchUrl');
+    await controller.loadUrl(
+      urlRequest: URLRequest(url: WebUri(launchUrl)),
+    );
+  }
+
+  /// Opens `mailto:` / `tel:` in the device's default mail / phone app.
+  Future<void> _openExternalApp(Uri uri) async {
+    final url = uri.toString();
+    debugPrint('BridgeSDK: opening external app url=$url');
+    try {
+      final ok = await url_launcher.launchUrl(
+        uri,
+        mode: url_launcher.LaunchMode.externalApplication,
+      );
+      if (!ok) {
+        // Fallback for hosts that reject externalApplication for mailto/tel.
+        final fallback = await url_launcher.launchUrl(
+          uri,
+          mode: url_launcher.LaunchMode.platformDefault,
+        );
+        if (!fallback) {
+          throw StateError('No app available to handle $url');
+        }
+      }
+    } catch (e) {
+      debugPrint('BridgeSDK: could not open $url — $e');
+      widget.onError?.call(
+        SdkError(SdkErrorCode.webviewLoadFailed, 'Could not open $url', e),
+      );
+    }
+  }
+
+  /// User-tapped / `_blank` links open in the closable overlay.
+  /// Redirects and programmatic loads stay in the current WebView.
+  bool _shouldOpenInOverlay(NavigationAction action) {
+    if (action.isRedirect == true) return false;
+
+    if (action.navigationType == NavigationType.LINK_ACTIVATED) return true;
+    if (action.hasGesture == true) return true;
+
+    // iOS/macOS: target=_blank has a null targetFrame.
+    if (!kIsWeb &&
+        (defaultTargetPlatform == TargetPlatform.iOS ||
+            defaultTargetPlatform == TargetPlatform.macOS) &&
+        action.targetFrame == null &&
+        action.isForMainFrame) {
+      return true;
+    }
+    return false;
+  }
+
+  Future<NavigationActionPolicy> _handleNavigation(
+    InAppWebViewController controller,
+    NavigationAction navigationAction, {
+    required bool fromOverlay,
+  }) async {
+    final uri = navigationAction.request.url;
+    if (uri == null) return NavigationActionPolicy.ALLOW;
+
+    final url = uri.toString();
+    final isMainFrame = navigationAction.isForMainFrame;
+
+    // SPA / iframe bootstrap — never cancel (except main-frame blob downloads).
+    if (isIgnorableNavigationScheme(url)) {
+      final lower = url.toLowerCase();
+      if (isMainFrame &&
+          (lower.startsWith('blob:') || lower.startsWith('data:'))) {
+        unawaited(_saveUrl(controller, url, fromOverlay: fromOverlay));
+        return NavigationActionPolicy.CANCEL;
+      }
+      return NavigationActionPolicy.ALLOW;
+    }
+
+    // Subframes (ads, DigiLocker iframes, etc.) must always proceed.
+    if (!isMainFrame) {
+      return NavigationActionPolicy.ALLOW;
+    }
+
+    if (isReturnUrl(url, widget.returnUrl)) {
+      _fireReturn(url);
+      return NavigationActionPolicy.CANCEL;
+    }
+
+    // mailto: / tel: — open the default system app (never the WebView).
+    if (uri.scheme == 'mailto' || uri.scheme == 'tel') {
+      unawaited(_openExternalApp(uri));
+      return NavigationActionPolicy.CANCEL;
+    }
+
+    // Explicit downloads only (download attr / zip). PDF/doc links open instead.
+    if (navigationAction.shouldPerformDownload == true ||
+        ((uri.scheme == 'http' || uri.scheme == 'https') &&
+            shouldForceDownload(url: url))) {
+      debugPrint('BridgeSDK: forcing download url=$url');
+      unawaited(_saveUrl(controller, url, fromOverlay: fromOverlay));
+      return NavigationActionPolicy.CANCEL;
+    }
+
+    if (isBlockedScheme(url)) {
+      debugPrint('WebView navigation blocked (scheme): $url');
+      return NavigationActionPolicy.CANCEL;
+    }
+
+    // User-tapped links (including PDFs) → closable overlay for viewing.
+    if (!fromOverlay &&
+        (uri.scheme == 'http' || uri.scheme == 'https') &&
+        _shouldOpenInOverlay(navigationAction)) {
+      debugPrint('BridgeSDK: opening link in overlay url=$url');
+      _openUrlOverlay(url);
+      return NavigationActionPolicy.CANCEL;
+    }
+
+    // Allow redirects, programmatic loads, and in-overlay navigations.
+    return NavigationActionPolicy.ALLOW;
+  }
+
+  Future<void> _saveUrl(
+    InAppWebViewController controller,
+    String url, {
+    required bool fromOverlay,
+    String? suggestedName,
+  }) async {
+    try {
+      final name = await _downloadService.saveFromWebView(
+        controller: controller,
+        url: url,
+        suggestedName: suggestedName,
+      );
+      debugPrint('BridgeSDK: saved download $name');
+      widget.onDownloadSaved?.call(name);
+      if (fromOverlay &&
+          mounted &&
+          _popupController != null &&
+          !await _popupController!.canGoBack()) {
+        // Overlay was opened only for a file — dismiss after save.
+        _closeOverlay();
+      }
+    } catch (e) {
+      debugPrint('BridgeSDK: download failed — $e');
+      widget.onDownloadError?.call(e);
+    }
+  }
+
+  Future<void> _onDownload(
+    InAppWebViewController controller,
+    DownloadStartRequest request, {
+    bool fromOverlay = false,
+  }) async {
+    debugPrint(
+      'BridgeSDK: onDownloadStart mime=${request.mimeType} '
+      'file=${request.suggestedFilename} url=${request.url}',
+    );
+    await _downloadService.handleDownloadStart(
+      controller: controller,
+      request: request,
+      onSaved: (name) {
+        debugPrint('BridgeSDK: saved download $name');
+        widget.onDownloadSaved?.call(name);
+      },
+      onError: (error) {
+        widget.onDownloadError?.call(error);
+      },
+    );
+    if (fromOverlay && mounted && !await controller.canGoBack()) {
+      _closeOverlay();
+    }
+  }
+
+  /// iOS: save archives; allow PDFs/docs to render for viewing.
+  Future<NavigationResponseAction?> _handleNavigationResponse(
+    InAppWebViewController controller,
+    NavigationResponse navigationResponse, {
+    required bool fromOverlay,
+  }) async {
+    if (!navigationResponse.isForMainFrame) {
+      return NavigationResponseAction.ALLOW;
+    }
+
+    final response = navigationResponse.response;
+    final mime = response?.mimeType;
+    final url = response?.url?.toString() ?? '';
+
+    // Zip / bulk package → save. PDF/HTML → allow (open/view).
+    if (shouldForceDownload(
+      url: url,
+      mimeType: mime,
+      suggestedFileName: response?.suggestedFilename,
+    )) {
+      debugPrint(
+        'BridgeSDK: navigationResponse → download mime=$mime '
+        'file=${response?.suggestedFilename} url=$url',
+      );
+      if (url.isNotEmpty) {
+        unawaited(
+          _saveUrl(
+            controller,
+            url,
+            fromOverlay: fromOverlay,
+            suggestedName: response?.suggestedFilename,
+          ),
+        );
+        return NavigationResponseAction.CANCEL;
+      }
+      return NavigationResponseAction.DOWNLOAD;
+    }
+
+    return NavigationResponseAction.ALLOW;
+  }
+
+  bool _maybeHandleReturn(String? url) {
+    if (url == null || url.isEmpty) return false;
+    if (!isReturnUrl(url, widget.returnUrl)) return false;
+    _fireReturn(url);
+    return true;
+  }
+
+  void _fireReturn(String url) {
+    if (_returnFired) return;
+    _returnFired = true;
+    final result = BridgeReturn(url: url, reason: returnReason(url));
+    _lastReturn = result;
+    debugPrint(
+      'BridgeSDK: intercepted returnUrl reason=${result.reason} url=$url',
+    );
+    unawaited(_mainController?.stopLoading());
+    unawaited(_popupController?.stopLoading());
+    _closeOverlay();
+    if (mounted) {
+      setState(() => _sessionEnded = true);
+    }
+    widget.onReturn?.call(result);
+  }
+
+  Future<PermissionResponse> _handlePermissionRequest(
+    PermissionRequest request,
+  ) async {
+    final needsCamera = request.resources.contains(PermissionResourceType.CAMERA);
+    final needsMic =
+        request.resources.contains(PermissionResourceType.MICROPHONE);
+
+    if (needsCamera && !(await Permission.camera.request()).isGranted) {
+      return PermissionResponse(
+        resources: request.resources,
+        action: PermissionResponseAction.DENY,
+      );
+    }
+    if (needsMic && !(await Permission.microphone.request()).isGranted) {
+      return PermissionResponse(
+        resources: request.resources,
+        action: PermissionResponseAction.DENY,
+      );
+    }
+    return PermissionResponse(
+      resources: request.resources,
+      action: PermissionResponseAction.GRANT,
+    );
+  }
+
+  Future<bool?> _handleCreateWindow(CreateWindowAction createWindowAction) async {
+    if (!mounted) return false;
+    final url = createWindowAction.request.url?.toString();
+    debugPrint(
+      'BridgeSDK: createWindow id=${createWindowAction.windowId} url=$url',
+    );
+
+    if (url != null && url.isNotEmpty) {
+      final parsed = Uri.tryParse(url);
+      if (parsed != null &&
+          (parsed.scheme == 'mailto' || parsed.scheme == 'tel')) {
+        unawaited(_openExternalApp(parsed));
+        return false;
+      }
+      // Zip / bulk download via window.open → save. PDFs open in overlay.
+      if (!isIgnorableNavigationScheme(url) && shouldForceDownload(url: url)) {
+        final controller = _mainController;
+        if (controller != null) {
+          unawaited(_saveUrl(controller, url, fromOverlay: false));
+        }
+        return false;
+      }
+    }
+
+    setState(() {
+      _showOverlay = true;
+      _popupWindowId = createWindowAction.windowId;
+      _overlayUrl = null;
+    });
+    return true;
+  }
+
+  void _openUrlOverlay(String url) {
+    if (!mounted) return;
+
+    final parsed = Uri.tryParse(url);
+    if (parsed != null &&
+        (parsed.scheme == 'mailto' || parsed.scheme == 'tel')) {
+      unawaited(_openExternalApp(parsed));
+      return;
+    }
+
+    // Zip / bulk package → save. PDF/doc links open in the overlay viewer.
+    if (shouldForceDownload(url: url)) {
+      final controller = _mainController;
+      if (controller != null) {
+        unawaited(_saveUrl(controller, url, fromOverlay: false));
+      }
+      return;
+    }
+
+    setState(() {
+      _showOverlay = true;
+      _popupWindowId = null;
+      _overlayUrl = url;
+    });
+  }
+
+  void _closeOverlay() {
+    if (!mounted) return;
+    setState(() {
+      _showOverlay = false;
+      _popupWindowId = null;
+      _overlayUrl = null;
+      _popupController = null;
+    });
+  }
+
+  Future<void> _handleBack() async {
+    if (_showOverlay) {
+      if (_popupController != null && await _popupController!.canGoBack()) {
+        await _popupController!.goBack();
+      } else {
+        _closeOverlay();
+      }
+      return;
+    }
+    if (_mainController != null && await _mainController!.canGoBack()) {
+      await _mainController!.goBack();
+      return;
+    }
+    if (!mounted) return;
+    Navigator.of(context).maybePop();
+  }
+
+  @override
+  Future<void> reload() => _bootstrap();
+
+  Widget _buildSessionEnded() {
+    final reason = _lastReturn?.reason;
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.all(24),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(Icons.check_circle_outline, size: 48),
+            const SizedBox(height: 12),
+            Text(
+              reason == null
+                  ? 'Bridge session ended'
+                  : 'Bridge returned: $reason',
+              textAlign: TextAlign.center,
+              style: const TextStyle(fontSize: 16),
+            ),
+            const SizedBox(height: 8),
+            const Text(
+              'Host app should handle onReturn (close this screen / continue).',
+              textAlign: TextAlign.center,
+              style: TextStyle(fontSize: 13, color: Colors.black54),
+            ),
+          ],
+        ),
       ),
     );
   }
 
-  void _clearWebViewAuthState() {
-    unawaited(_runScript(webViewBridge.getClearAuthScript()));
-  }
-
-  Future<void> _resetWebView() async {
-    _hasEverBeenReady = false;
-    setState(() {
-      _storedTokens = {};
-      _webViewInstanceKey += 1;
-      _webViewController = null;
-    });
-    await _createWebViewController();
-  }
-
-  Future<void> _goToUrl(String url) async {
-    await _runScript(webViewBridge.getLocationScript(url));
-  }
-
-  void _finishCheckout(CheckoutEvent event, {String? navigateUrl}) {
-    widget.onCheckoutEvent?.call(event);
-    if (navigateUrl != null && navigateUrl.isNotEmpty) {
-      unawaited(_goToUrl(navigateUrl));
-    }
-    if (mounted) setState(() => _checkout = null);
-  }
-
-  Color _parseColor(String hex) {
-    var cleaned = hex.replaceFirst('#', '');
-    if (cleaned.length == 6) cleaned = 'FF$cleaned';
-    final value = int.tryParse(cleaned, radix: 16);
-    if (value == null) return Colors.white;
-    return Color(value);
-  }
-
-  // ─── BridgeSdkController ───────────────────────────────────────────────────
-
-  @override
-  void reload() {
-    unawaited(_webViewController?.reload());
-  }
-
-  @override
-  Future<void> logout() async {
-    await _storageService.clearTokens();
-    _clearWebViewAuthState();
-    await _resetWebView();
-  }
-
-  @override
-  Future<void> postMessage(Object? message) async {
-    await _runScript(webViewBridge.getPostMessageScript(message));
-  }
-
-  @override
-  AuthChangeState getAuthState() {
-    final authenticated = _storedTokens.values.any(
-      (v) => v is String && v.isNotEmpty,
+  Widget _buildMainWebView(String launchUrl) {
+    return InAppWebView(
+      key: ValueKey('main-$_webViewInstanceKey'),
+      initialSettings: _webSettings,
+      initialUserScripts: _userScripts,
+      onWebViewCreated: (controller) async {
+        _mainController = controller;
+        _registerDownloadHandler(controller);
+        if (!kIsWeb && defaultTargetPlatform == TargetPlatform.android) {
+          await InAppWebViewController.setWebContentsDebuggingEnabled(
+            !kReleaseMode,
+          );
+        }
+        await _loadLaunchUrl(controller, launchUrl);
+      },
+      shouldOverrideUrlLoading: (controller, action) =>
+          _handleNavigation(controller, action, fromOverlay: false),
+      onLoadStart: (controller, url) {
+        final s = url?.toString();
+        if (s != null && isReturnUrl(s, widget.returnUrl)) {
+          _maybeHandleReturn(s);
+        }
+      },
+      onUpdateVisitedHistory: (controller, url, isReload) {
+        final s = url?.toString();
+        if (s != null && isReturnUrl(s, widget.returnUrl)) {
+          _maybeHandleReturn(s);
+        }
+      },
+      onPermissionRequest: (controller, request) =>
+          _handlePermissionRequest(request),
+      onCreateWindow: (controller, action) => _handleCreateWindow(action),
+      onCloseWindow: (controller) {},
+      onLoadStop: (controller, url) async {
+        final s = url?.toString();
+        if (s != null && _maybeHandleReturn(s)) return;
+        // Re-inject click interceptor for SPAs that replace the document.
+        try {
+          await controller.evaluateJavascript(source: _downloadClickJs);
+          await controller.evaluateJavascript(source: _hideScrollbarCssJs);
+        } catch (_) {}
+        if (!_readyFired) {
+          _readyFired = true;
+          debugPrint('BridgeSDK: page ready url=$s');
+          widget.onReady?.call();
+        }
+      },
+      onReceivedError: (controller, request, error) {
+        final failing = request.url.toString();
+        if (isReturnUrl(failing, widget.returnUrl)) {
+          _maybeHandleReturn(failing);
+          return;
+        }
+        if (isIgnorableNavigationScheme(failing)) return;
+        if (error.type == WebResourceErrorType.CANCELLED) return;
+        final desc = error.description.toLowerCase();
+        if (desc.contains('cancelled') ||
+            desc.contains('canceled') ||
+            desc.contains('error -999')) {
+          return;
+        }
+        if (request.isForMainFrame ?? true) {
+          debugPrint(
+            'BridgeSDK: load error ${error.type} ${error.description} url=$failing',
+          );
+          widget.onError?.call(
+            SdkError(
+              SdkErrorCode.webviewLoadFailed,
+              error.description,
+              error,
+            ),
+          );
+        }
+      },
+      onDownloadStartRequest: (controller, request) =>
+          _onDownload(controller, request),
+      onNavigationResponse: (controller, response) =>
+          _handleNavigationResponse(
+            controller,
+            response,
+            fromOverlay: false,
+          ),
     );
-    return AuthChangeState(
-      authenticated: authenticated,
-      tokens: Map<String, String?>.from(_storedTokens),
+  }
+
+  Widget _buildOverlayWebView() {
+    final windowId = _popupWindowId;
+    final overlayUrl = _overlayUrl;
+
+    return InAppWebView(
+      key: ValueKey(
+        windowId != null ? 'popup-$windowId' : 'overlay-$overlayUrl',
+      ),
+      windowId: windowId,
+      initialSettings: _webSettings,
+      initialUserScripts: _userScripts,
+      onWebViewCreated: (controller) async {
+        _popupController = controller;
+        _registerDownloadHandler(controller);
+        await _prepareController(controller);
+        if (windowId == null && overlayUrl != null) {
+          if (shouldForceDownload(url: overlayUrl)) {
+            await _saveUrl(controller, overlayUrl, fromOverlay: true);
+            return;
+          }
+          await controller.loadUrl(
+            urlRequest: URLRequest(url: WebUri(overlayUrl)),
+          );
+        }
+      },
+      shouldOverrideUrlLoading: (controller, action) =>
+          _handleNavigation(controller, action, fromOverlay: true),
+      onLoadStart: (controller, url) {
+        final s = url?.toString();
+        if (s != null && isReturnUrl(s, widget.returnUrl)) {
+          _maybeHandleReturn(s);
+        }
+      },
+      onLoadStop: (controller, url) async {
+        try {
+          await controller.evaluateJavascript(source: _downloadClickJs);
+          await controller.evaluateJavascript(source: _hideScrollbarCssJs);
+        } catch (_) {}
+      },
+      onPermissionRequest: (controller, request) =>
+          _handlePermissionRequest(request),
+      onCloseWindow: (controller) => _closeOverlay(),
+      onReceivedError: (controller, request, error) {
+        final failing = request.url.toString();
+        if (isReturnUrl(failing, widget.returnUrl)) {
+          _maybeHandleReturn(failing);
+        }
+      },
+      onDownloadStartRequest: (controller, request) =>
+          _onDownload(controller, request, fromOverlay: true),
+      onNavigationResponse: (controller, response) =>
+          _handleNavigationResponse(
+            controller,
+            response,
+            fromOverlay: true,
+          ),
+    );
+  }
+
+  Widget _buildOverlay() {
+    return Positioned.fill(
+      child: Material(
+        color: Colors.white,
+        elevation: 8,
+        child: Column(
+          children: [
+            Material(
+              color: const Color(0xFFF5F5F5),
+              child: SizedBox(
+                height: 48,
+                child: Row(
+                  children: [
+                    const SizedBox(width: 8),
+                    const Expanded(
+                      child: Text(
+                        'Close to return',
+                        style: TextStyle(
+                          fontSize: 14,
+                          color: Colors.black54,
+                        ),
+                      ),
+                    ),
+                    IconButton(
+                      tooltip: 'Close',
+                      icon: const Icon(Icons.close),
+                      onPressed: _closeOverlay,
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            Expanded(child: _buildOverlayWebView()),
+          ],
+        ),
+      ),
     );
   }
 
   @override
   Widget build(BuildContext context) {
-    final statusBarBg = _parseColor(widget.theme.secondaryColor);
-
     return AnnotatedRegion<SystemUiOverlayStyle>(
       value: const SystemUiOverlayStyle(
         statusBarColor: Colors.transparent,
@@ -553,79 +1024,33 @@ class _BridgeSdkState extends State<BridgeSdk> implements BridgeSdkController {
         statusBarBrightness: Brightness.light,
       ),
       child: ColoredBox(
-        color: statusBarBg,
+        color: Colors.white,
         child: SafeArea(
-          top: false,
-          bottom: false,
+          top: true,
+          bottom: true,
+          left: false,
+          right: false,
           child: PopScope(
-            canPop: !_canGoBack,
+            canPop: false,
             onPopInvokedWithResult: (didPop, _) async {
               if (didPop) return;
-              if (_canGoBack) {
-                await _webViewController?.goBack();
-              }
+              await _handleBack();
             },
-            child: Stack(
-              children: [
-                if (_authHydrated && _webViewController != null)
-                  KeyedSubtree(
-                    key: ValueKey(_webViewInstanceKey),
-                    child: WebViewWidget(controller: _webViewController!),
-                  )
-                else
-                  const Center(child: CircularProgressIndicator()),
-                if (_checkout != null) _buildCheckoutOverlay(_checkout!),
-              ],
-            ),
+            child: _bootstrapping || _launchUrl == null
+                ? const Center(child: CircularProgressIndicator())
+                : _sessionEnded
+                    ? _buildSessionEnded()
+                    : Stack(
+                        children: [
+                          Positioned.fill(
+                            child: _buildMainWebView(_launchUrl!),
+                          ),
+                          if (_showOverlay &&
+                              (_popupWindowId != null || _overlayUrl != null))
+                            _buildOverlay(),
+                        ],
+                      ),
           ),
-        ),
-      ),
-    );
-  }
-
-  Widget _buildCheckoutOverlay(CheckoutPayload checkout) {
-    return Positioned.fill(
-      child: Material(
-        color: Colors.white,
-        child: GlomoPayCheckout(
-          config: GlomoPayConfig(
-            publicKey: checkout.publicKey,
-            orderId: checkout.orderId,
-          ),
-          onPaymentSuccess: (_) {
-            _finishCheckout(
-              CheckoutSuccess(checkout),
-              navigateUrl: checkout.successUrl,
-            );
-          },
-          onPaymentFailure: (_) {
-            _finishCheckout(
-              CheckoutFailure(checkout),
-              navigateUrl: checkout.failureUrl,
-            );
-          },
-          onUserJourneyCompleted: (_) {
-            // Async bank-transfer path — treat as success redirect for web parity.
-            _finishCheckout(
-              CheckoutSuccess(checkout),
-              navigateUrl: checkout.successUrl,
-            );
-          },
-          onSdkError: (errors) {
-            _finishCheckout(CheckoutSdkError(checkout, errors));
-          },
-          onConnectionError: (error) {
-            _finishCheckout(
-              CheckoutConnectionError(checkout, error),
-              navigateUrl: checkout.failureUrl,
-            );
-          },
-          onPaymentTerminate: (_) {
-            _finishCheckout(
-              CheckoutTerminated(checkout),
-              navigateUrl: checkout.failureUrl,
-            );
-          },
         ),
       ),
     );

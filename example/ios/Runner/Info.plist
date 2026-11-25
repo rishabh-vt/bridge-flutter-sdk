@@ -66,13 +66,33 @@
 		<string>UIInterfaceOrientationLandscapeLeft</string>
 		<string>UIInterfaceOrientationLandscapeRight</string>
 	</array>
+	<key>NSCameraUsageDescription</key>
+	<string>Camera access is required for KYC / liveness verification in Bridge.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Microphone access is required for KYC / liveness verification in Bridge.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>Photo library access is required to upload documents and selfies in Bridge.</string>
 	<key>UIFileSharingEnabled</key>
 	<true/>
 	<key>LSSupportsOpeningDocumentsInPlace</key>
 	<true/>
-	<key>NSCameraUsageDescription</key>
-	<string>This app requires camera access to upload documents required for payment verification.</string>
-	<key>NSPhotoLibraryUsageDescription</key>
-	<string>This app requires photo library access to select documents for payment verification.</string>
+	<key>LSApplicationQueriesSchemes</key>
+	<array>
+		<string>mailto</string>
+		<string>tel</string>
+		<string>https</string>
+		<string>http</string>
+	</array>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>bridge.flutter.sdk.return</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>bridgeflutter</string>
+			</array>
+		</dict>
+	</array>
 </dict>
 </plist>

@@ -1,10 +1,10 @@
 # bridge-flutter-sdk
 
-Embeddable WebView-based onboarding and trading shell for Flutter host apps. Drop in one widget — the SDK handles authentication, session persistence, DigiLocker redirects, document downloads, and the GlomoPay checkout flow.
+Flutter embedding of ViewTrade Bridge for mobile apps. Pass user tokens; the SDK `POST`s `/launch`, opens `launchUrl` in an InAppWebView, and intercepts a **custom-scheme** `returnUrl` when Bridge finishes.
 
-Independent Flutter port of `@viewtrade/bridge-react-native-sdk`, preserving the same web ↔ native message contract so the existing ViewTrade web app works unchanged.
+Aligned with the Bridge **Mobile App Integration** module (`flutter_inappwebview`).
 
-> **Naming:** Project / repo = `bridge-flutter-sdk`. Dart package import name = `bridge_flutter_sdk` (underscores required by Dart).
+> **Naming:** Project / repo = `bridge-flutter-sdk`. Dart package import name = `bridge_flutter_sdk`.
 
 ---
 
@@ -12,183 +12,123 @@ Independent Flutter port of `@viewtrade/bridge-react-native-sdk`, preserving the
 
 - Flutter ≥ 3.24
 - Dart ≥ 3.5
-- iOS 13+ / Android 5.0+ (API 21+)
+- iOS 15+ / Android 5.0+ (API 21+)
 
 ---
 
 ## Install
 
-The package is published on [pub.dev](https://pub.dev/packages/bridge_flutter_sdk).
-
-### From pub.dev (recommended)
-
-**Option A — CLI**
-
-In your Flutter app root:
-
 ```bash
 flutter pub add bridge_flutter_sdk
 ```
 
-**Option B — edit `pubspec.yaml`**
-
-```yaml
-dependencies:
-  bridge_flutter_sdk: ^1.0.1
-  # Transitive: glomopay_sdk, webview_flutter, shared_preferences, http, path_provider
-```
-
-Then fetch dependencies:
-
-```bash
-flutter pub get
-```
-
-Import in Dart:
-
-```dart
-import 'package:bridge_flutter_sdk/bridge_flutter_sdk.dart';
-```
-
-### From this repo (local development)
-
-```yaml
-dependencies:
-  bridge_flutter_sdk:
-    path: ../bridge-flutter-sdk
-```
-
-```bash
-flutter pub get
-```
-
-### Android
-
-Ensure `INTERNET` is present in `AndroidManifest.xml` (Flutter templates include it). For GlomoPay document uploads during checkout, also add camera/storage permissions as documented by [`glomopay_sdk`](https://pub.dev/packages/glomopay_sdk).
-
-### iOS
-
-For agreement PDF downloads to appear in the Files app, add to `Info.plist`:
+### Android (`AndroidManifest.xml`)
 
 ```xml
-<key>UIFileSharingEnabled</key>
-<true/>
-<key>LSSupportsOpeningDocumentsInPlace</key>
-<true/>
+<uses-permission android:name="android.permission.INTERNET"/>
+<uses-permission android:name="android.permission.CAMERA"/>
+<uses-permission android:name="android.permission.RECORD_AUDIO"/>
+<uses-permission android:name="android.permission.READ_MEDIA_IMAGES"/>
+<uses-permission android:name="android.permission.READ_MEDIA_VIDEO"/>
+<uses-feature android:name="android.hardware.camera" android:required="false"/>
 ```
 
-For GlomoPay camera/photo uploads, add `NSCameraUsageDescription` and `NSPhotoLibraryUsageDescription`.
+### iOS (`Info.plist`)
+
+```xml
+<key>NSCameraUsageDescription</key>
+<string>Camera access is required for KYC / liveness verification.</string>
+<key>NSMicrophoneUsageDescription</key>
+<string>Microphone access is required for KYC / liveness verification.</string>
+<key>NSPhotoLibraryUsageDescription</key>
+<string>Photo library access is required to upload documents.</string>
+<!-- Register your returnUrl scheme, e.g. myapp://sdk-return -->
+<key>CFBundleURLTypes</key>
+<array>
+  <dict>
+    <key>CFBundleURLSchemes</key>
+    <array><string>myapp</string></array>
+  </dict>
+</array>
+```
 
 ---
 
 ## Quickstart
 
 ```dart
-import 'package:bridge_flutter_sdk/bridge_flutter_sdk.dart';
-import 'package:flutter/material.dart';
-
-class App extends StatelessWidget {
-  const App({super.key});
-
-  @override
-  Widget build(BuildContext context) {
-    return MaterialApp(
-      home: Scaffold(
-        body: BridgeSdk(
-          firmId: 'YOUR_FIRM_ID',
-          appName: 'Your App Name',
-          authFormSlug: 'your-auth-form-slug',
-          branchIdRi: 'YOUR_RI_BRANCH_ID',
-          branchIdNri: 'YOUR_NRI_BRANCH_ID',
-          helpEmail: 'support@yourdomain.com',
-          helpUrl: 'https://www.yourdomain.com/help',
-          tncUrl: 'https://www.yourdomain.com/terms',
-          ppUrl: 'https://www.yourdomain.com/privacy',
-          disclaimerUrl: 'https://www.yourdomain.com/disclaimer',
-          aboutUrl: 'https://www.yourdomain.com/about',
-          environment: Environment.uat,
-          theme: const ThemeConfig(
-            primaryColor: '#0F5D73',
-            secondaryColor: '#E6F6FA',
-          ),
-        ),
-      ),
-    );
-  }
-}
-```
-
----
-
-## Imperative controller
-
-```dart
-final controller = ValueNotifier<BridgeSdkController?>(null);
-
 BridgeSdk(
-  controller: controller,
-  // ...required props
-);
-
-controller.value?.reload();
-await controller.value?.logout();
-await controller.value?.postMessage({'type': 'host.ping'});
-final auth = controller.value?.getAuthState();
-```
-
-| Method | Description |
-|---|---|
-| `reload()` | Reloads the WebView in place. |
-| `logout()` | Clears stored tokens and in-page auth, then remounts the WebView. |
-| `postMessage(message)` | Dispatches a `message` event into the WebView. |
-| `getAuthState()` | Returns `{ authenticated, tokens }` from current SDK state. |
-
----
-
-## SSO
-
-```dart
-BridgeSdk(
-  // ...required props
-  sso: true,
-  userAccessToken: currentUserAccessToken,
+  token: tokens.access_token,
+  clientName: clientName,                 // assigned by Viewtrade
+  refreshToken: tokens.refresh_token,
+  accessTokenExpiresAt: '${tokens.access_expires_at}',
+  refreshTokenExpiresAt: '${tokens.refresh_expires_at}',
+  returnUrl: 'myapp://sdk-return',        // custom scheme — not https
+  environment: Environment.UAT,           // or Environment.PROD
+  onReturn: (result) {
+    // result.reason: logout | email_verified | error | …
+    // Close the Bridge screen / continue host flow.
+  },
+  onError: (err) => debugPrint(err.toString()),
 )
 ```
 
-The SDK does **not** refresh this token. When it expires, the host must supply a fresh `userAccessToken`.
+### Launch flow (mobile)
 
----
+1. Host obtains user tokens (partner login → impersonate) on **your server**.
+2. SDK `POST`s tokens to Bridge `/launch` and receives `launchUrl`.
+3. `launchUrl` loads in InAppWebView (camera/mic, file upload, funding popups supported).
+4. On completion Bridge navigates to `returnUrl?reason=…` — SDK **cancels** the load and fires `onReturn`.
 
-## Callbacks
-
-| Callback | When |
+| `environment` | Launch URL |
 |---|---|
-| `onReady` | Web app signals mounted/painted. |
-| `onAuthChange` | Login/logout. |
-| `onLogout` | Web app or `controller.logout()`. |
-| `onCheckoutEvent` | GlomoPay lifecycle (`requested` / `success` / `failure` / `terminated` / `connection-error` / `sdk-error`). |
-| `onError` | Config validation, WebView load/crash failures. |
+| `Environment.UAT` | `https://bridge-backend-staging.viewtrade.in/launch` |
+| `Environment.PROD` | `https://sdk-backend.viewtrade.in/launch` |
 
 ---
 
-## GlomoPay
+## Props
 
-Uses the official [`glomopay_sdk`](https://pub.dev/packages/glomopay_sdk) package. When the web app posts `funds.deposit.checkout`, the SDK overlays `GlomoPayCheckout` with the provided `publicKey` / `orderId`, then redirects the WebView to `successUrl` / `failureUrl`.
-
-Mock/test mode is controlled by GlomoPay key prefixes (`test_…` / `mock_…`), not a hardcoded `devMode` flag.
+| Prop | Required | Description |
+|---|---|---|
+| `token` | yes | `tokens.access_token` |
+| `refreshToken` | yes | `tokens.refresh_token` |
+| `clientName` | yes | Partner client id from Viewtrade |
+| `returnUrl` | yes | Custom scheme, e.g. `myapp://sdk-return` |
+| `environment` | yes | `UAT` or `PROD` |
+| `accessTokenExpiresAt` | yes | Epoch seconds/ms |
+| `refreshTokenExpiresAt` | yes | Epoch seconds/ms |
+| `onReady` | no | First Bridge page finished |
+| `onReturn` | no | Custom-scheme return intercepted (`BridgeReturn`) |
+| `onError` | no | Config / launch / WebView failures |
+| `controller` | no | `reload()` |
 
 ---
 
-## Web bridge compatibility
+## Mobile behaviors (SDK)
 
-The Flutter SDK injects a shim so the existing web app keeps working:
+- Custom-scheme `returnUrl` intercept (`reason` query forwarded)
+- Funding `window.open` popup WebView
+- Camera / mic `getUserMedia` via `permission_handler`
+- `<input type="file">` handled by InAppWebView
+- Strip `; wv` from Android user-agent (bank pages)
+- Third-party cookies enabled
+- Back: popup → Bridge history → leave screen
+- `mailto:` / `tel:` opened externally via `url_launcher`
+- Document downloads (blob ZIP + http PDFs) via `onDownloadStartRequest` + MethodChannel `bridge_flutter_sdk/downloads`
+- Document **links** open in a closable overlay for viewing; **Download all** / zip / `download` attr save to disk
+- Download permissions requested before save (Android storage / notifications; iOS Documents + Files sharing)
 
-```js
-window.ReactNativeWebView.postMessage(...)
-window.__RN_WEBVIEW_CONFIG__
-```
+### Downloads (host setup)
 
-Inbound messages arrive via a Flutter `JavascriptChannel` named `FlutterBridge`.
+Implement MethodChannel `bridge_flutter_sdk/downloads` → method `saveToDownloads` with `{ bytes, fileName, mimeType }` (see example `MainActivity.kt` / `AppDelegate.swift`).
+
+| Platform | Permissions / setup |
+|---|---|
+| Android | `POST_NOTIFICATIONS` (API 33+); `WRITE_EXTERNAL_STORAGE` maxSdk 28; MediaStore Downloads on API 29+ |
+| iOS | No runtime download permission — enable `UIFileSharingEnabled` + `LSSupportsOpeningDocumentsInPlace` so files appear in the Files app |
+
+If the channel is missing, files fall back to app documents.
 
 ---
 
@@ -196,19 +136,9 @@ Inbound messages arrive via a Flutter `JavascriptChannel` named `FlutterBridge`.
 
 | Code | When |
 |---|---|
-| `INVALID_CONFIG` | Missing/empty required props, incomplete theme, SSO without token, rejected URL scheme. |
-| `WEBVIEW_LOAD_FAILED` | Main-frame WebView load failure. |
-| `WEBVIEW_RENDER_PROCESS_GONE` | Render process crash (auto-reload up to 2 times). |
-| `STORAGE_FAILED` / `MESSAGE_PARSE_FAILED` / `CHECKOUT_FAILED` | Reserved. |
-
----
-
-## Example
-
-```bash
-cd example
-flutter run
-```
+| `INVALID_CONFIG` | Missing props or http(s) `returnUrl` |
+| `LAUNCH_FAILED` | `/launch` network / HTTP / missing `launchUrl` |
+| `WEBVIEW_LOAD_FAILED` | Main-frame load failure |
 
 ---
 
