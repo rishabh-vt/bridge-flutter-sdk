@@ -1,5 +1,10 @@
 # Changelog
 
+## 2.1.2
+
+- Docs: README install constraint updated to `^2.1.1`.
+- Release packaging aligned with funding, safe-area, and Android WebView fixes.
+
 ## 2.1.1
 
 - Android: keep funding/checkout navigations in the main WebView (avoid gesture→overlay).
