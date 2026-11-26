@@ -1,5 +1,13 @@
 # Changelog
 
+## 2.1.1
+
+- Android: keep funding/checkout navigations in the main WebView (avoid gesture→overlay).
+- Funding `window.open` popups: full-bleed overlay with no host close button.
+- Align iOS/Android bottom tab bar height (WKWebView safe-area + Android inset clamp).
+- Android: WASM streaming fallback, hybrid composition, `textZoom: 100`.
+- Do not treat arbitrary `data:` navigations as downloads.
+
 ## 2.1.0
 
 Mobile App Integration (Bridge SDK UAT guide):
