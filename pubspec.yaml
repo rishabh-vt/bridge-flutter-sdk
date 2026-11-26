@@ -1,6 +1,6 @@
 name: bridge_flutter_sdk
 description: "bridge-flutter-sdk — ViewTrade Bridge Flutter SDK (token launch → WebView shell)."
-version: 2.1.2
+version: 2.1.3
 homepage: https://www.viewtrade.com
 repository: https://github.com/viewtrade/bridge-flutter-sdk
 

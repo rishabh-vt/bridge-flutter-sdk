@@ -31,7 +31,7 @@ Or in `pubspec.yaml`:
 
 ```yaml
 dependencies:
-  bridge_flutter_sdk: ^2.1.1
+  bridge_flutter_sdk: ^2.1.3
 ```
 
 ```dart

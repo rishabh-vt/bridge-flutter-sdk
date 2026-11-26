@@ -1,5 +1,10 @@
 # Changelog
 
+## 2.1.3
+
+- Android: detect system navigation bar via `viewPadding.bottom` and reserve space with a layout sibling + `ClipRect` so the Bridge tab bar is not drawn under the back/home bar (edge-to-edge / hybrid WebView).
+- Soften Android safe-area JS so tab bar height is not collapsed when stripping double insets.
+
 ## 2.1.2
 
 - Docs: README install constraint updated to `^2.1.1`.
