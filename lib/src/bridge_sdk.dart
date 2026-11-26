@@ -137,6 +137,79 @@ const String _hideScrollbarCssJs = r'''
 })();
 ''';
 
+/// Android WebView often fails `WebAssembly.instantiateStreaming`; fall back
+/// to ArrayBuffer instantiation so checkout / funding pages can boot.
+const String _wasmFallbackJs = r'''
+(function () {
+  if (window.__bridgeWasmFix) return;
+  window.__bridgeWasmFix = true;
+  if (typeof WebAssembly === 'undefined' || !WebAssembly.instantiateStreaming) return;
+  var original = WebAssembly.instantiateStreaming.bind(WebAssembly);
+  WebAssembly.instantiateStreaming = function (source, imports) {
+    return Promise.resolve(source).then(function (response) {
+      return original(response, imports).catch(function () {
+        return Promise.resolve(source).then(function (res) {
+          return (res && res.arrayBuffer) ? res.arrayBuffer() : res;
+        }).then(function (buffer) {
+          return WebAssembly.instantiate(buffer, imports);
+        });
+      });
+    });
+  };
+})();
+''';
+
+/// Android Chrome WebView still applies `env(safe-area-inset-bottom)` inside the
+/// page even when Flutter SafeArea already inset the WebView, which makes the
+/// bottom tab bar taller than iOS. Clamp fixed/sticky bottom bars.
+const String _androidBottomNavHeightFixJs = r'''
+(function () {
+  if (window.__bridgeAndroidNavFix) return;
+  window.__bridgeAndroidNavFix = true;
+
+  var style = document.createElement('style');
+  style.id = 'bridge-android-nav-fix';
+  style.textContent =
+    'html, body { padding-bottom: 0 !important; margin-bottom: 0 !important; }' +
+    '.pb-safe, .pb-safe-or-2, .pb-safe-or-4, .safe-area-bottom, .safe-pb,' +
+    '.safe-area-inset-bottom, .pb-safe-bottom { padding-bottom: 0 !important; }';
+  (document.documentElement || document.head).appendChild(style);
+
+  function clampBottomBars() {
+    if (!document.body) return;
+    var nodes = document.body.querySelectorAll('*');
+    for (var i = 0; i < nodes.length; i++) {
+      var el = nodes[i];
+      var cs = window.getComputedStyle(el);
+      if (cs.position !== 'fixed' && cs.position !== 'sticky') continue;
+      var bottom = parseFloat(cs.bottom);
+      if (!isFinite(bottom) || bottom > 2) continue;
+      var pb = parseFloat(cs.paddingBottom) || 0;
+      // Extra inset from Android safe-area; keep a small content pad only.
+      if (pb > 12) {
+        el.style.setProperty('padding-bottom', '8px', 'important');
+      }
+    }
+  }
+
+  function run() {
+    clampBottomBars();
+  }
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', run);
+  } else {
+    run();
+  }
+  setTimeout(run, 300);
+  setTimeout(run, 1000);
+  setTimeout(run, 2500);
+  try {
+    new MutationObserver(function () { clampBottomBars(); })
+      .observe(document.documentElement, { childList: true, subtree: true });
+  } catch (e) {}
+})();
+''';
+
 /// Embeddable Bridge shell — token → `POST /launch` → InAppWebView (mobile module).
 class BridgeSdk extends StatefulWidget {
   const BridgeSdk({
@@ -213,21 +286,35 @@ class _BridgeSdkState extends State<BridgeSdk> implements BridgeSdkController {
   int _webViewInstanceKey = 0;
   BridgeReturn? _lastReturn;
 
-  UnmodifiableListView<UserScript> get _userScripts =>
-      UnmodifiableListView<UserScript>([
+  UnmodifiableListView<UserScript> get _userScripts {
+    final scripts = <UserScript>[
+      UserScript(
+        source: _wasmFallbackJs,
+        injectionTime: UserScriptInjectionTime.AT_DOCUMENT_START,
+      ),
+      UserScript(
+        source: _blobCaptureJs,
+        injectionTime: UserScriptInjectionTime.AT_DOCUMENT_START,
+      ),
+      UserScript(
+        source: _downloadClickJs,
+        injectionTime: UserScriptInjectionTime.AT_DOCUMENT_START,
+      ),
+      UserScript(
+        source: _hideScrollbarCssJs,
+        injectionTime: UserScriptInjectionTime.AT_DOCUMENT_START,
+      ),
+    ];
+    if (!kIsWeb && defaultTargetPlatform == TargetPlatform.android) {
+      scripts.add(
         UserScript(
-          source: _blobCaptureJs,
+          source: _androidBottomNavHeightFixJs,
           injectionTime: UserScriptInjectionTime.AT_DOCUMENT_START,
         ),
-        UserScript(
-          source: _downloadClickJs,
-          injectionTime: UserScriptInjectionTime.AT_DOCUMENT_START,
-        ),
-        UserScript(
-          source: _hideScrollbarCssJs,
-          injectionTime: UserScriptInjectionTime.AT_DOCUMENT_START,
-        ),
-      ]);
+      );
+    }
+    return UnmodifiableListView<UserScript>(scripts);
+  }
 
   InAppWebViewSettings get _webSettings => InAppWebViewSettings(
         javaScriptEnabled: true,
@@ -252,6 +339,16 @@ class _BridgeSdkState extends State<BridgeSdk> implements BridgeSdkController {
         // Hide native WebView scrollbars (content still scrolls).
         verticalScrollBarEnabled: false,
         horizontalScrollBarEnabled: false,
+        // Android: hybrid composition is more reliable for nested checkout iframes.
+        useHybridComposition: true,
+        allowContentAccess: true,
+        allowFileAccess: true,
+        // Keep Android text scale consistent with iOS WebView sizing.
+        textZoom: 100,
+        // Flutter SafeArea already insets the WebView. Without NEVER, iOS WKWebView
+        // still reports safe-area-inset-bottom and the web tab bar double-pads.
+        contentInsetAdjustmentBehavior:
+            ScrollViewContentInsetAdjustmentBehavior.NEVER,
         // Bank/funding pages reject the "; wv" WebView UA marker — set before load.
         userAgent: null,
       );
@@ -403,6 +500,10 @@ class _BridgeSdkState extends State<BridgeSdk> implements BridgeSdkController {
         await controller.setSettings(
           settings: InAppWebViewSettings(
             userAgent: '$cleaned BridgeSDK/$_sdkVersion',
+            // Re-assert after UA change — checkout iframes need this on Android.
+            thirdPartyCookiesEnabled: true,
+            javaScriptCanOpenWindowsAutomatically: true,
+            supportMultipleWindows: true,
           ),
         );
       }
@@ -489,10 +590,32 @@ class _BridgeSdkState extends State<BridgeSdk> implements BridgeSdkController {
     }
   }
 
-  /// User-tapped / `_blank` links open in the closable overlay.
-  /// Redirects and programmatic loads stay in the current WebView.
+  /// Decide whether a main-frame navigation should move into the overlay.
+  ///
+  /// Funding / checkout must stay in the normal WebView flow on Android.
+  /// Android marks many in-page navigations as `hasGesture`, and intercepting
+  /// those into a fresh overlay breaks the session. Real popups still go through
+  /// [onCreateWindow] (`window.open` / `target=_blank`).
+  ///
+  /// Document links (PDF, etc.) may still open in the overlay for viewing.
   bool _shouldOpenInOverlay(NavigationAction action) {
     if (action.isRedirect == true) return false;
+
+    // POST (and other non-GET) must stay in the current WebView — overlay
+    // only supports a GET loadUrl and would drop the body.
+    final method = action.request.method?.toUpperCase() ?? 'GET';
+    if (method != 'GET') return false;
+
+    final url = action.request.url?.toString() ?? '';
+    final isDocumentLink = shouldSaveDocument(url: url);
+
+    // Android: only peel document links into the overlay. Everything else
+    // (including funding) continues in-place or via onCreateWindow.
+    if (!kIsWeb && defaultTargetPlatform == TargetPlatform.android) {
+      if (!isDocumentLink) return false;
+      return action.navigationType == NavigationType.LINK_ACTIVATED ||
+          action.hasGesture == true;
+    }
 
     if (action.navigationType == NavigationType.LINK_ACTIVATED) return true;
     if (action.hasGesture == true) return true;
@@ -519,11 +642,14 @@ class _BridgeSdkState extends State<BridgeSdk> implements BridgeSdkController {
     final url = uri.toString();
     final isMainFrame = navigationAction.isForMainFrame;
 
-    // SPA / iframe bootstrap — never cancel (except main-frame blob downloads).
+    // SPA / iframe bootstrap — never cancel.
+    // Only treat main-frame blob/data as a download when it is clearly a file
+    // (zip/pdf/…). Cancelling arbitrary data: URLs breaks Android module loads.
     if (isIgnorableNavigationScheme(url)) {
       final lower = url.toLowerCase();
       if (isMainFrame &&
-          (lower.startsWith('blob:') || lower.startsWith('data:'))) {
+          (lower.startsWith('blob:') || lower.startsWith('data:')) &&
+          shouldForceDownload(url: url)) {
         unawaited(_saveUrl(controller, url, fromOverlay: fromOverlay));
         return NavigationActionPolicy.CANCEL;
       }
@@ -749,6 +875,9 @@ class _BridgeSdkState extends State<BridgeSdk> implements BridgeSdkController {
       _popupWindowId = createWindowAction.windowId;
       _overlayUrl = null;
     });
+    // Android needs the windowId WebView mounted before we accept the popup.
+    await WidgetsBinding.instance.endOfFrame;
+    if (!mounted) return false;
     return true;
   }
 
@@ -877,6 +1006,11 @@ class _BridgeSdkState extends State<BridgeSdk> implements BridgeSdkController {
         try {
           await controller.evaluateJavascript(source: _downloadClickJs);
           await controller.evaluateJavascript(source: _hideScrollbarCssJs);
+          if (!kIsWeb && defaultTargetPlatform == TargetPlatform.android) {
+            await controller.evaluateJavascript(
+              source: _androidBottomNavHeightFixJs,
+            );
+          }
         } catch (_) {}
         if (!_readyFired) {
           _readyFired = true;
@@ -982,37 +1116,42 @@ class _BridgeSdkState extends State<BridgeSdk> implements BridgeSdkController {
   }
 
   Widget _buildOverlay() {
+    // Funding / checkout popups (`window.open` → onCreateWindow) must be
+    // full-bleed with no host close chrome. Document overlays keep the bar.
+    final isFundingPopup = _popupWindowId != null;
+
     return Positioned.fill(
       child: Material(
         color: Colors.white,
         elevation: 8,
         child: Column(
           children: [
-            Material(
-              color: const Color(0xFFF5F5F5),
-              child: SizedBox(
-                height: 48,
-                child: Row(
-                  children: [
-                    const SizedBox(width: 8),
-                    const Expanded(
-                      child: Text(
-                        'Close to return',
-                        style: TextStyle(
-                          fontSize: 14,
-                          color: Colors.black54,
+            if (!isFundingPopup)
+              Material(
+                color: const Color(0xFFF5F5F5),
+                child: SizedBox(
+                  height: 48,
+                  child: Row(
+                    children: [
+                      const SizedBox(width: 8),
+                      const Expanded(
+                        child: Text(
+                          'Close to return',
+                          style: TextStyle(
+                            fontSize: 14,
+                            color: Colors.black54,
+                          ),
                         ),
                       ),
-                    ),
-                    IconButton(
-                      tooltip: 'Close',
-                      icon: const Icon(Icons.close),
-                      onPressed: _closeOverlay,
-                    ),
-                  ],
+                      IconButton(
+                        tooltip: 'Close',
+                        icon: const Icon(Icons.close),
+                        onPressed: _closeOverlay,
+                      ),
+                    ],
+                  ),
                 ),
               ),
-            ),
             Expanded(child: _buildOverlayWebView()),
           ],
         ),
@@ -1030,6 +1169,8 @@ class _BridgeSdkState extends State<BridgeSdk> implements BridgeSdkController {
       ),
       child: ColoredBox(
         color: Colors.white,
+        // Inset once at the Flutter layer so iOS + Android bottom tab bars match.
+        // (WKWebView safe-area is disabled via contentInsetAdjustmentBehavior.)
         child: SafeArea(
           top: true,
           bottom: true,

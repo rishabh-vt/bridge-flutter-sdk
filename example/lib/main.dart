@@ -1,7 +1,7 @@
 import 'package:bridge_flutter_sdk/bridge_flutter_sdk.dart';
 import 'package:flutter/material.dart';
 
-/// Pass session values at run time — never commit real JWTs:
+/// Pass session values at run time (overrides the defaults below):
 /// ```
 /// flutter run \
 ///   --dart-define=BRIDGE_ACCESS_TOKEN=... \
@@ -39,7 +39,7 @@ class _BridgeHomeState extends State<_BridgeHome> {
   BridgeReturn? _returnResult;
   bool _showBridge = true;
 
-  static const String _token = String.fromEnvironment(
+static const String _token = String.fromEnvironment(
     'BRIDGE_ACCESS_TOKEN',
     defaultValue: '',
   );
@@ -71,7 +71,8 @@ class _BridgeHomeState extends State<_BridgeHome> {
       _token.isNotEmpty &&
       _refreshToken.isNotEmpty &&
       _accessExpiresAt.isNotEmpty &&
-      _refreshExpiresAt.isNotEmpty;
+      _refreshExpiresAt.isNotEmpty &&
+      _clientName.isNotEmpty;
 
   @override
   Widget build(BuildContext context) {
