@@ -15,7 +15,7 @@ import 'services/launch_service.dart';
 import 'types/errors.dart';
 import 'types/types.dart';
 
-const String _sdkVersion = '2.1.3';
+const String _sdkVersion = '2.1.4';
 
 /// Capture blob: URLs and route ZIP / `download` attr clicks to Flutter.
 /// Handles programmatic `a.click()` used by "Download all documents".

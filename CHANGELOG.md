@@ -1,5 +1,9 @@
 # Changelog
 
+## 2.1.4
+
+- Widen `permission_handler` to `>=11.3.1 <13.0.0` so hosts on `^12` (e.g. macm_flutter) can resolve alongside the SDK.
+
 ## 2.1.3
 
 - Android: detect system navigation bar via `viewPadding.bottom` and reserve space with a layout sibling + `ClipRect` so the Bridge tab bar is not drawn under the back/home bar (edge-to-edge / hybrid WebView).
