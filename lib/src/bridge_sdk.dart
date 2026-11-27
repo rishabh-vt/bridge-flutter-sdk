@@ -15,7 +15,7 @@ import 'services/launch_service.dart';
 import 'types/errors.dart';
 import 'types/types.dart';
 
-const String _sdkVersion = '2.1.4';
+const String _sdkVersion = '2.1.5';
 
 /// Capture blob: URLs and route ZIP / `download` attr clicks to Flutter.
 /// Handles programmatic `a.click()` used by "Download all documents".
@@ -372,7 +372,9 @@ class BridgeSdk extends StatefulWidget {
   /// Host client id → launch body `clientName`.
   final String clientName;
 
-  /// Custom app scheme return URL (e.g. `myapp://sdk-return`), not http(s).
+  /// Dynamic return URL supplied by the host when Bridge finishes.
+  /// Accepts a custom scheme (`myapp://sdk-return`) or any HTTPS URL
+  /// (`https://yourapp.com/bridge-return`). Plain `http` is rejected.
   final String returnUrl;
 
   /// [Environment.UAT] or [Environment.PROD].
@@ -474,7 +476,7 @@ class _BridgeSdkState extends State<BridgeSdk> implements BridgeSdkController {
         useOnDownloadStart: true,
         // iOS: inspect response MIME so PDFs are downloaded, not opened in-WebView.
         useOnNavigationResponse: true,
-        // Required for shouldOverrideUrlLoading (custom-scheme returnUrl).
+        // Required for shouldOverrideUrlLoading (custom-scheme / HTTPS returnUrl).
         useShouldOverrideUrlLoading: true,
         thirdPartyCookiesEnabled: true,
         sharedCookiesEnabled: true,

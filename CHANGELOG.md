@@ -1,5 +1,9 @@
 # Changelog
 
+## 2.1.5
+
+- `returnUrl` is dynamic: hosts may pass a custom scheme or any HTTPS URL (still intercept + `onReturn`; plain `http` rejected).
+
 ## 2.1.4
 
 - Widen `permission_handler` to `>=11.3.1 <13.0.0` so hosts on `^12` (e.g. macm_flutter) can resolve alongside the SDK.

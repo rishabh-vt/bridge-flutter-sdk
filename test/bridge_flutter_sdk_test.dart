@@ -35,11 +35,12 @@ void main() {
       expect(validateHttpsUrl('http://x.com').ok, isFalse);
     });
 
-    test('validateReturnUrl requires custom scheme', () {
+    test('validateReturnUrl allows custom scheme or https', () {
       expect(validateReturnUrl('myapp://sdk-return').ok, isTrue);
       expect(validateReturnUrl('bridgeflutter://sdk-return').ok, isTrue);
-      expect(validateReturnUrl('https://yourapp.com/return').ok, isFalse);
+      expect(validateReturnUrl('https://yourapp.com/return').ok, isTrue);
       expect(validateReturnUrl('http://yourapp.com/return').ok, isFalse);
+      expect(validateReturnUrl('https://').ok, isFalse);
     });
 
     test('isReturnUrl matches custom scheme + host', () {
@@ -49,6 +50,16 @@ void main() {
       expect(isReturnUrl('$ret?reason=email_verified', ret), isTrue);
       expect(isReturnUrl('myapp://other', ret), isFalse);
       expect(isReturnUrl('https://yourapp.com/return', ret), isFalse);
+    });
+
+    test('isReturnUrl matches https path prefix', () {
+      const ret = 'https://yourapp.com/bridge-return';
+      expect(isReturnUrl(ret, ret), isTrue);
+      expect(isReturnUrl('$ret?reason=logout', ret), isTrue);
+      expect(isReturnUrl('$ret/extra?reason=done', ret), isTrue);
+      expect(isReturnUrl('https://yourapp.com/other', ret), isFalse);
+      expect(isReturnUrl('https://evil.com/bridge-return', ret), isFalse);
+      expect(isReturnUrl('http://yourapp.com/bridge-return', ret), isFalse);
     });
 
     test('returnReason reads query param', () {
@@ -136,8 +147,32 @@ void main() {
   });
 
   group('BridgeSdk validation', () {
-    testWidgets('rejects https returnUrl (must be custom scheme)',
+    testWidgets('rejects http returnUrl (https or custom scheme only)',
         (tester) async {
+      SdkError? seen;
+      await tester.pumpWidget(
+        MaterialApp(
+          home: BridgeSdk(
+            token: 't',
+            refreshToken: 'r',
+            clientName: 'MAPS',
+            returnUrl: 'http://yourapp.com/bridge-return',
+            accessTokenExpiresAt: '1',
+            refreshTokenExpiresAt: '2',
+            environment: Environment.UAT,
+            onError: (e) => seen = e,
+          ),
+        ),
+      );
+      await tester.pump();
+      await tester.pump();
+
+      expect(seen, isNotNull);
+      expect(seen!.code, SdkErrorCode.invalidConfig);
+      expect(seen!.message, contains('returnUrl'));
+    });
+
+    testWidgets('accepts https returnUrl config', (tester) async {
       SdkError? seen;
       await tester.pumpWidget(
         MaterialApp(
@@ -156,9 +191,11 @@ void main() {
       await tester.pump();
       await tester.pump();
 
-      expect(seen, isNotNull);
-      expect(seen!.code, SdkErrorCode.invalidConfig);
-      expect(seen!.message, contains('returnUrl'));
+      expect(
+        seen?.code,
+        isNot(SdkErrorCode.invalidConfig),
+        reason: 'https returnUrl must pass local validation',
+      );
     });
 
     testWidgets('reports INVALID_CONFIG when token is empty', (tester) async {

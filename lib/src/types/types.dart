@@ -17,7 +17,7 @@ enum Environment {
       };
 }
 
-/// Fired when Bridge navigates to the host [returnUrl] (custom scheme).
+/// Fired when Bridge navigates to the host [returnUrl] (custom scheme or HTTPS).
 class BridgeReturn {
   const BridgeReturn({
     required this.url,

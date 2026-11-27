@@ -2,7 +2,7 @@
 
 Client integration guide for **bridge_flutter_sdk** — embeddable Bridge onboarding / trading shell for Flutter hosts.
 
-The SDK `POST`s host tokens to Bridge `/launch`, loads `launchUrl` in `flutter_inappwebview`, and intercepts a **custom-scheme** `returnUrl` when Bridge finishes.
+The SDK `POST`s host tokens to Bridge `/launch`, loads `launchUrl` in `flutter_inappwebview`, and intercepts `returnUrl` (custom scheme or **HTTPS**) when Bridge finishes.
 
 > **Naming:** Project / repo = `bridge-flutter-sdk`. Dart import = `bridge_flutter_sdk`. Widget = `BridgeSdk`.
 
@@ -31,7 +31,7 @@ Or in `pubspec.yaml`:
 
 ```yaml
 dependencies:
-  bridge_flutter_sdk: ^2.1.4
+  bridge_flutter_sdk: ^2.1.5
 ```
 
 ```dart
@@ -112,7 +112,7 @@ BridgeSdk(
   accessTokenExpiresAt: '${tokens.access_expires_at}',
   refreshTokenExpiresAt: '${tokens.refresh_expires_at}',
   clientName: clientName,              // assigned by Viewtrade
-  returnUrl: 'myapp://sdk-return',     // custom scheme — not https
+  returnUrl: 'myapp://sdk-return',     // or https://yourapp.com/bridge-return
   environment: Environment.UAT,        // or Environment.PROD
   onReturn: (result) {
     // result.reason: logout | email_verified | error | …
@@ -143,7 +143,7 @@ BridgeSdk(
 | `token` | yes | `tokens.access_token` |
 | `refreshToken` | yes | `tokens.refresh_token` |
 | `clientName` | yes | Partner client id from Viewtrade |
-| `returnUrl` | yes | Custom scheme, e.g. `myapp://sdk-return` |
+| `returnUrl` | yes | Dynamic — custom scheme **or** any HTTPS URL (plain `http` rejected) |
 | `environment` | yes | `Environment.UAT` or `Environment.PROD` |
 | `accessTokenExpiresAt` | yes | Epoch seconds/ms |
 | `refreshTokenExpiresAt` | yes | Epoch seconds/ms |
@@ -158,7 +158,7 @@ BridgeSdk(
 
 ## Mobile behaviors (SDK)
 
-- Custom-scheme `returnUrl` intercept (`reason` forwarded)
+- Custom-scheme or HTTPS `returnUrl` intercept (`reason` forwarded)
 - Funding `window.open` / user links → closable overlay WebView
 - Document **links** open for viewing; **Download all** / zip / `download` attr save to disk
 - PDFs WK can render are shown; MIME types it cannot show are downloaded
@@ -175,7 +175,7 @@ BridgeSdk(
 
 | Code | When |
 |---|---|
-| `INVALID_CONFIG` | Missing props or http(s) `returnUrl` |
+| `INVALID_CONFIG` | Missing props or invalid `returnUrl` (e.g. plain `http`) |
 | `LAUNCH_FAILED` | `/launch` network / HTTP / missing `launchUrl` |
 | `WEBVIEW_LOAD_FAILED` | Main-frame load failure |
 

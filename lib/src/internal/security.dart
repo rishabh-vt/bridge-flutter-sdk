@@ -34,7 +34,8 @@ bool isBlockedScheme(String url) {
   );
 }
 
-/// Mobile returnUrl must be a custom scheme (not http/https), e.g. `myapp://sdk-return`.
+/// Host-supplied [returnUrl] is dynamic: custom app scheme
+/// (`myapp://sdk-return`) or any HTTPS URL. Plain `http` is rejected.
 ({bool ok, String? reason}) validateReturnUrl(String url) {
   late final Uri parsed;
   try {
@@ -46,12 +47,18 @@ bool isBlockedScheme(String url) {
   if (scheme.isEmpty) {
     return (ok: false, reason: 'missing URL scheme');
   }
-  if (scheme == 'http' || scheme == 'https') {
+  if (scheme == 'http') {
     return (
       ok: false,
       reason:
-          'returnUrl must be a custom app scheme (e.g. myapp://sdk-return), not http(s)',
+          'returnUrl must be https or a custom app scheme (e.g. myapp://sdk-return), not http',
     );
+  }
+  if (scheme == 'https') {
+    if (parsed.host.isEmpty) {
+      return (ok: false, reason: 'https returnUrl requires a host');
+    }
+    return (ok: true, reason: null);
   }
   if (scheme == 'javascript' ||
       scheme == 'file' ||
@@ -67,7 +74,12 @@ String _stripQueryAndFragment(String url) {
   return noHash.split('?').first;
 }
 
-/// True when [url] is the configured custom-scheme [returnUrl] (query ignored).
+String _cleanPath(String path) {
+  if (path.isEmpty || path == '/') return '/';
+  return path.endsWith('/') ? path.substring(0, path.length - 1) : path;
+}
+
+/// True when [url] matches configured [returnUrl] (query / fragment ignored).
 bool isReturnUrl(String url, String returnUrl) {
   if (returnUrl.isEmpty) return false;
   final normalized = url.trim();
@@ -87,6 +99,16 @@ bool isReturnUrl(String url, String returnUrl) {
     final expected = Uri.parse(target);
     if (actual.scheme.toLowerCase() != expected.scheme.toLowerCase()) {
       return false;
+    }
+
+    final isHttps = expected.scheme.toLowerCase() == 'https';
+    if (isHttps) {
+      if (actual.host.toLowerCase() != expected.host.toLowerCase()) {
+        return false;
+      }
+      final ep = _cleanPath(expected.path);
+      final ap = _cleanPath(actual.path);
+      return ap == ep || (ep != '/' && ap.startsWith('$ep/'));
     }
 
     // myapp://sdk-return  → host = sdk-return
